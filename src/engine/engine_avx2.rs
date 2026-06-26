@@ -74,8 +74,12 @@ impl Engine for Avx2 {
         }
     }
 
-    fn eval_poly(erasures: &mut [GfElement; GF_ORDER], truncated_size: usize) {
-        unsafe { Self::eval_poly_avx2(erasures, truncated_size) }
+    fn eval_poly_out_truncated(
+        erasures: &mut [GfElement; GF_ORDER],
+        truncated_size: usize,
+        output_count: usize,
+    ) {
+        unsafe { Self::eval_poly_avx2(erasures, truncated_size, output_count) }
     }
 }
 
@@ -496,8 +500,12 @@ impl Avx2 {
 
 impl Avx2 {
     #[target_feature(enable = "avx2")]
-    unsafe fn eval_poly_avx2(erasures: &mut [GfElement; GF_ORDER], truncated_size: usize) {
-        utils::eval_poly(erasures, truncated_size);
+    unsafe fn eval_poly_avx2(
+        erasures: &mut [GfElement; GF_ORDER],
+        truncated_size: usize,
+        output_count: usize,
+    ) {
+        utils::eval_poly_out_truncated(erasures, truncated_size, output_count);
     }
 }
 

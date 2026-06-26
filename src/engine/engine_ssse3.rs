@@ -74,8 +74,12 @@ impl Engine for Ssse3 {
         }
     }
 
-    fn eval_poly(erasures: &mut [GfElement; GF_ORDER], truncated_size: usize) {
-        unsafe { Self::eval_poly_ssse3(erasures, truncated_size) }
+    fn eval_poly_out_truncated(
+        erasures: &mut [GfElement; GF_ORDER],
+        truncated_size: usize,
+        output_count: usize,
+    ) {
+        unsafe { Self::eval_poly_ssse3(erasures, truncated_size, output_count) }
     }
 }
 
@@ -481,8 +485,12 @@ impl Ssse3 {
 
 impl Ssse3 {
     #[target_feature(enable = "ssse3")]
-    unsafe fn eval_poly_ssse3(erasures: &mut [GfElement; GF_ORDER], truncated_size: usize) {
-        utils::eval_poly(erasures, truncated_size);
+    unsafe fn eval_poly_ssse3(
+        erasures: &mut [GfElement; GF_ORDER],
+        truncated_size: usize,
+        output_count: usize,
+    ) {
+        utils::eval_poly_out_truncated(erasures, truncated_size, output_count);
     }
 }
 

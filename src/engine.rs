@@ -156,7 +156,23 @@ pub trait Engine {
     where
         Self: Sized,
     {
-        utils::eval_poly(erasures, truncated_size);
+        Self::eval_poly_out_truncated(erasures, truncated_size, GF_ORDER);
+    }
+
+    /// Evaluate polynomial, computing only the first `output_count` outputs.
+    ///
+    /// `truncated_size` is the number of non-zero `erasures` at the front;
+    /// `output_count` is the number of leading outputs the caller reads (the
+    /// rest are left unspecified). Engines should override this rather than
+    /// [`eval_poly`](Engine::eval_poly), which delegates here.
+    fn eval_poly_out_truncated(
+        erasures: &mut [GfElement; GF_ORDER],
+        truncated_size: usize,
+        output_count: usize,
+    ) where
+        Self: Sized,
+    {
+        utils::eval_poly_out_truncated(erasures, truncated_size, output_count);
     }
 }
 

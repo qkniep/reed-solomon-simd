@@ -24,6 +24,47 @@ pub(crate) fn fwht(data: &mut [GfElement; GF_ORDER], m_truncated: usize) {
     }
 }
 
+/// Decimation in time (DIT) Fast Walsh-Hadamard Transform that only computes
+/// the first `output_count` outputs (rounded up to a power of two); the rest of
+/// `data` is left in an unspecified state.
+///
+/// Unlike [`fwht`], this assumes `data` is fully populated (no input
+/// truncation). The WHT is a tensor power, so zeroing the high-order index bits
+/// of the output equals GF-summing the input over those bits. We therefore fold
+/// `data` down to `k = output_count.next_power_of_two()` elements in `O(GF_ORDER)`
+/// and run a full WHT over just those, in `O(k log k)`. The first `output_count`
+/// outputs are bit-identical to [`fwht`]'s.
+#[inline(always)]
+pub(crate) fn fwht_out_truncated(data: &mut [GfElement; GF_ORDER], output_count: usize) {
+    let k = output_count.next_power_of_two();
+
+    if k >= GF_ORDER {
+        fwht(data, GF_ORDER);
+        return;
+    }
+
+    // Fold the high-order index bits by GF-summing strided groups:
+    //   fold[i] = Σ_q data[q * k + i]   for i in 0..k
+    for base in (k..GF_ORDER).step_by(k) {
+        for i in 0..k {
+            data[i] = utils::add_mod(data[i], data[base + i]);
+        }
+    }
+
+    // Full radix-2 WHT over the `k` folded elements.
+    let mut dist = 1;
+    while dist < k {
+        for r in (0..k).step_by(dist * 2) {
+            for offset in r..r + dist {
+                let (sum, dif) = fwht_2(data[offset], data[offset + dist]);
+                data[offset] = sum;
+                data[offset + dist] = dif;
+            }
+        }
+        dist <<= 1;
+    }
+}
+
 // ======================================================================
 // FWHT - PRIVATE
 
@@ -145,6 +186,41 @@ mod tests {
             fwht_naive(&mut data2);
 
             assert_eq!(data1, data2);
+        }
+    }
+
+    #[test]
+    fn test_out_truncated() {
+        let mut rng = ChaCha8Rng::from_seed([0; 32]);
+        let random: [GfElement; GF_ORDER] = [(); GF_ORDER].map(|_| rng.random());
+
+        for output_count in [
+            0,
+            1,
+            2,
+            3,
+            4,
+            42,
+            64,
+            127,
+            16384 - 1,
+            16384 + 1,
+            GF_ORDER / 2,
+            GF_ORDER - 1,
+            GF_ORDER,
+        ] {
+            let mut full = random;
+            let mut truncated = random;
+
+            fwht(&mut full, GF_ORDER);
+            fwht_out_truncated(&mut truncated, output_count);
+
+            // The first `output_count` outputs must match the full transform.
+            assert_eq!(
+                full[..output_count],
+                truncated[..output_count],
+                "mismatch for output_count = {output_count}"
+            );
         }
     }
 }

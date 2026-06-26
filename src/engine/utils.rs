@@ -18,6 +18,23 @@ use core::iter::zip;
 /// [`Avx2`]: crate::engine::Avx2
 #[inline(always)]
 pub fn eval_poly(erasures: &mut [GfElement; GF_ORDER], truncated_size: usize) {
+    eval_poly_out_truncated(erasures, truncated_size, GF_ORDER);
+}
+
+/// Like [`eval_poly`], but only computes the first `output_count` outputs
+/// (output truncation of the final transform), leaving `erasures[output_count..]`
+/// unspecified.
+///
+/// `truncated_size` is the number of non-zero `erasures` at the front (input
+/// truncation of the first transform); `output_count` is the number of leading
+/// outputs the caller actually reads. Decoding only reads a prefix of the
+/// result, so this avoids the otherwise-fixed full `GF_ORDER` final transform.
+#[inline(always)]
+pub fn eval_poly_out_truncated(
+    erasures: &mut [GfElement; GF_ORDER],
+    truncated_size: usize,
+    output_count: usize,
+) {
     let log_walsh = tables::get_log_walsh();
 
     fwht::fwht(erasures, truncated_size);
@@ -27,7 +44,7 @@ pub fn eval_poly(erasures: &mut [GfElement; GF_ORDER], truncated_size: usize) {
         *e = add_mod(product as GfElement, (product >> GF_BITS) as GfElement);
     }
 
-    fwht::fwht(erasures, GF_ORDER);
+    fwht::fwht_out_truncated(erasures, output_count);
 }
 
 /// `x[] ^= y[]`

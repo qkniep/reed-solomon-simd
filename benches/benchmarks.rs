@@ -339,6 +339,16 @@ fn benchmarks_engine_one<E: Engine>(c: &mut Criterion, name: &str, engine: E) {
         b.iter(|| E::eval_poly(black_box(&mut data), GF_ORDER / 8))
     });
 
+    // HighRate decode at small recovery counts: input and output both truncated.
+    group.bench_function("eval_poly out-trunc 64", |b| {
+        b.iter(|| E::eval_poly_out_truncated(black_box(&mut data), 64, 64))
+    });
+
+    // LowRate decode at small recovery counts: full input, truncated output.
+    group.bench_function("eval_poly out-trunc 64 full-input", |b| {
+        b.iter(|| E::eval_poly_out_truncated(black_box(&mut data), GF_ORDER, 64))
+    });
+
     // MUL
 
     let mut x = &mut generate_shards_64(1, shard_len_64, 0)[0];
