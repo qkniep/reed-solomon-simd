@@ -37,7 +37,7 @@ pub fn eval_poly_out_truncated(
 ) {
     let log_walsh = tables::get_log_walsh();
 
-    fwht::fwht(erasures, truncated_size);
+    fwht::fwht_in_truncated(erasures, truncated_size);
 
     for (e, factor) in zip(erasures.iter_mut(), log_walsh.iter()) {
         let product = u32::from(*e) * u32::from(*factor);
