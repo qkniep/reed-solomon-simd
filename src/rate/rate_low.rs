@@ -231,8 +231,19 @@ impl<E: Engine> RateDecoder<E> for LowRateDecoder<E> {
         work.zero(recovery_end..);
 
         // IFFT / FORMAL DERIVATIVE / FFT
+        //
+        // Truncate the IFFT to the highest received shard (everything above it is
+        // zero), instead of the full `recovery_end`; skipped butterflies are
+        // zero-on-zero no-ops, so the full output is unchanged. Large saving when
+        // the missing shards are the high-index ones.
 
-        self.engine.ifft(&mut work, 0, work_count, recovery_end, 0);
+        let ifft_truncated = (0..recovery_end)
+            .rev()
+            .find(|&i| received[i] && (i < original_count || i >= chunk_size))
+            .map_or(0, |i| i + 1);
+
+        self.engine
+            .ifft(&mut work, 0, work_count, ifft_truncated, 0);
         engine::formal_derivative(&mut work);
         self.engine.fft(&mut work, 0, work_count, recovery_end, 0);
 
