@@ -2,7 +2,7 @@ use core::iter::zip;
 
 use crate::engine::{
     tables::{self, Mul16, Skew},
-    utils, Engine, GfElement, ShardsRefMut, GF_MODULUS,
+    utils, Engine, GfElement, ShardsRefMut, GF_MODULUS, GF_ORDER,
 };
 
 // ======================================================================
@@ -73,6 +73,14 @@ impl Engine for NoSimd {
                 x_hi[i] = (prod >> 8) as u8;
             }
         }
+    }
+
+    fn eval_poly_out_truncated(
+        erasures: &mut [GfElement; GF_ORDER],
+        truncated_size: usize,
+        output_count: usize,
+    ) {
+        utils::eval_poly_out_truncated(erasures, truncated_size, output_count);
     }
 }
 

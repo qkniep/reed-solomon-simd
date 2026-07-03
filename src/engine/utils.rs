@@ -9,25 +9,67 @@ use core::iter::zip;
 // FUNCTIONS - PUBLIC
 
 /// Evaluate Polynomial using Fast Walsh-Hadamard Transform (FWHT).
+#[inline(always)]
+pub fn eval_poly(erasures: &mut [GfElement; GF_ORDER], truncated_size: usize) {
+    eval_poly_out_truncated(erasures, truncated_size, GF_ORDER);
+}
+
+/// Like [`eval_poly`], but only computes the first `output_count` outputs
+/// (output truncation of the final transform), leaving `erasures[output_count..]`
+/// unspecified.
+///
+/// `truncated_size` is the number of non-zero `erasures` at the front (input
+/// truncation of the first transform); `output_count` is the number of leading
+/// outputs the caller actually reads. Decoding only reads a prefix of the
+/// result, so this avoids the otherwise-fixed full `GF_ORDER` final transform.
 ///
 /// This function is designed to be inlined and be compiled with SIMD
-/// features enabled within an Engine's implementation of `eval_poly`.
+/// features enabled within an Engine's implementation of
+/// `eval_poly_out_truncated`.
 ///
 /// See [`Avx2`] for an example on how to do this.
 ///
 /// [`Avx2`]: crate::engine::Avx2
 #[inline(always)]
-pub fn eval_poly(erasures: &mut [GfElement; GF_ORDER], truncated_size: usize) {
+pub fn eval_poly_out_truncated(
+    erasures: &mut [GfElement; GF_ORDER],
+    truncated_size: usize,
+    output_count: usize,
+) {
     let log_walsh = tables::get_log_walsh();
 
-    fwht::fwht(erasures, truncated_size);
+    fwht::fwht_in_truncated(erasures, truncated_size);
 
-    for (e, factor) in zip(erasures.iter_mut(), log_walsh.iter()) {
-        let product = u32::from(*e) * u32::from(*factor);
-        *e = add_mod(product as GfElement, (product >> GF_BITS) as GfElement);
+    // The pointwise multiply by `log_walsh` and the output-truncation fold are
+    // both `O(GF_ORDER)` passes. Fuse them: accumulate each element's product
+    // straight into the first `k` outputs, instead of a full multiply pass
+    // followed by a separate fold pass.
+    let k = output_count.next_power_of_two();
+
+    if k >= GF_ORDER {
+        // No output truncation: multiply in place, then run the full transform.
+        for (e, factor) in zip(erasures.iter_mut(), log_walsh.iter()) {
+            *e = mul_mod(*e, *factor);
+        }
+        fwht::fwht(erasures, GF_ORDER);
+        return;
     }
 
-    fwht::fwht(erasures, GF_ORDER);
+    // out[i] = Σ_q (erasures[q*k + i] * log_walsh[q*k + i]), folded into
+    // `erasures[0..k]`. The `q = 0` term seeds the accumulator in place; later
+    // terms read only indices `>= k`, which are never written, so this is safe.
+    for i in 0..k {
+        erasures[i] = mul_mod(erasures[i], log_walsh[i]);
+    }
+    for base in (k..GF_ORDER).step_by(k) {
+        for i in 0..k {
+            let product = mul_mod(erasures[base + i], log_walsh[base + i]);
+            erasures[i] = add_mod(erasures[i], product);
+        }
+    }
+
+    // Full radix-2 WHT over the `k` folded elements.
+    fwht::wht_pow2(erasures, k);
 }
 
 /// `x[] ^= y[]`
@@ -68,6 +110,14 @@ pub(crate) fn sub_mod(x: GfElement, y: GfElement) -> GfElement {
     dif.wrapping_add(dif >> GF_BITS) as GfElement
 }
 
+/// Some kind of multiplication (used by [`eval_poly_out_truncated`]'s pointwise
+/// step, where one operand is a precomputed `log_walsh` factor).
+#[inline(always)]
+pub(crate) fn mul_mod(x: GfElement, y: GfElement) -> GfElement {
+    let product = u32::from(x) * u32::from(y);
+    add_mod(product as GfElement, (product >> GF_BITS) as GfElement)
+}
+
 // ======================================================================
 // FUNCTIONS - CRATE
 
@@ -100,5 +150,73 @@ pub(crate) fn formal_derivative(data: &mut ShardsRefMut) {
     for i in 1..data.len() {
         let width: usize = 1 << i.trailing_zeros();
         xor_within(data, i - width, i, width);
+    }
+}
+
+// ======================================================================
+// TESTS
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::GF_MODULUS;
+    #[cfg(not(feature = "std"))]
+    use alloc::vec::Vec;
+    use rand::{Rng, SeedableRng};
+    use rand_chacha::ChaCha8Rng;
+
+    // Un-fused reference: input transform, full pointwise multiply, output
+    // transform, with no truncation.
+    fn eval_poly_reference(erasures: &mut [GfElement; GF_ORDER]) {
+        let log_walsh = tables::get_log_walsh();
+        fwht::fwht(erasures, GF_ORDER);
+        for (e, factor) in zip(erasures.iter_mut(), log_walsh.iter()) {
+            *e = mul_mod(*e, *factor);
+        }
+        fwht::fwht(erasures, GF_ORDER);
+    }
+
+    #[test]
+    fn eval_poly_out_truncated_matches_reference() {
+        let mut rng = ChaCha8Rng::from_seed([0; 32]);
+        let random: Vec<GfElement> = (0..GF_ORDER).map(|_| rng.random()).collect();
+
+        // Outputs are only canonical mod `GF_MODULUS`: `0` and `GF_MODULUS` both
+        // encode zero, and the two evaluation orders may pick different
+        // encodings, so compare canonicalized values.
+        let canonical = |x: GfElement| if x == GF_MODULUS { 0 } else { x };
+
+        for (truncated_size, output_count) in [
+            (1, 1),
+            (64, 64),
+            (128, 128),
+            (200, 200),
+            (256, 64),      // output smaller than input
+            (64, 256),      // output larger than input
+            (GF_ORDER, 64), // dense input, truncated output (LowRate shape)
+            (64, GF_ORDER), // truncated input, full output
+            (GF_ORDER, GF_ORDER),
+        ] {
+            let mut got = [0; GF_ORDER];
+            got[..truncated_size].copy_from_slice(&random[..truncated_size]);
+            let mut want = got;
+
+            eval_poly_out_truncated(&mut got, truncated_size, output_count);
+            eval_poly_reference(&mut want);
+
+            assert_eq!(
+                got[..output_count]
+                    .iter()
+                    .copied()
+                    .map(canonical)
+                    .collect::<Vec<_>>(),
+                want[..output_count]
+                    .iter()
+                    .copied()
+                    .map(canonical)
+                    .collect::<Vec<_>>(),
+                "mismatch for (truncated_size, output_count) = ({truncated_size}, {output_count})"
+            );
+        }
     }
 }

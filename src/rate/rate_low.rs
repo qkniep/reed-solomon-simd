@@ -201,7 +201,7 @@ impl<E: Engine> RateDecoder<E> for LowRateDecoder<E> {
 
         // EVALUATE POLYNOMIAL
 
-        E::eval_poly(&mut erasures, GF_ORDER);
+        E::eval_poly_out_truncated(&mut erasures, GF_ORDER, recovery_end);
 
         // MULTIPLY SHARDS
 

@@ -158,6 +158,26 @@ pub trait Engine {
     {
         utils::eval_poly(erasures, truncated_size);
     }
+
+    /// Evaluate polynomial, computing only the first `output_count` outputs.
+    ///
+    /// `truncated_size` is the number of non-zero `erasures` at the front;
+    /// `output_count` is the number of leading outputs the caller reads (the
+    /// rest are left unspecified). The default implementation delegates to
+    /// [`eval_poly`](Engine::eval_poly), which computes all outputs and thus
+    /// always satisfies this contract, so [`Engine`]:s that override only
+    /// `eval_poly` keep working. Engines should override this method as well
+    /// to skip computing the unused outputs.
+    fn eval_poly_out_truncated(
+        erasures: &mut [GfElement; GF_ORDER],
+        truncated_size: usize,
+        output_count: usize,
+    ) where
+        Self: Sized,
+    {
+        let _ = output_count;
+        Self::eval_poly(erasures, truncated_size);
+    }
 }
 
 // ======================================================================

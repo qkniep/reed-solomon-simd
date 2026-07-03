@@ -24,6 +24,64 @@ pub(crate) fn fwht(data: &mut [GfElement; GF_ORDER], m_truncated: usize) {
     }
 }
 
+/// Like [`fwht`], but folds the input truncation instead of pruning it.
+///
+/// `truncated_size` is the number of non-zero elements at the front of `data`;
+/// the rest must be zero. When only the first `m` inputs are non-zero, the WHT
+/// output is exactly periodic with period `k = m.next_power_of_two()`: each
+/// output index's high-order bits never enter `popcount(i & j)` because the
+/// corresponding bits of every non-zero `j` are zero, so `out[i] = out[i % k]`.
+///
+/// We therefore run a full WHT over just the first `k` elements in
+/// `O(k log k)` and replicate that block across the array in `O(GF_ORDER)`
+/// copies, instead of the `O(GF_ORDER)` butterflies the high-stride stages of
+/// [`fwht`] would otherwise perform. The result is bit-identical to [`fwht`].
+#[inline(always)]
+pub(crate) fn fwht_in_truncated(data: &mut [GfElement; GF_ORDER], truncated_size: usize) {
+    let k = truncated_size.next_power_of_two();
+
+    if k >= GF_ORDER {
+        fwht(data, truncated_size);
+        return;
+    }
+
+    // Full radix-2 WHT over the `k` leading elements (`data[truncated_size..k]`
+    // is already zero).
+    wht_pow2(data, k);
+
+    // The full WHT output is periodic with period `k`; replicate the block by
+    // repeated doubling (`k` and `GF_ORDER` are both powers of two).
+    let mut filled = k;
+    while filled < GF_ORDER {
+        let (head, tail) = data.split_at_mut(filled);
+        tail[..filled].copy_from_slice(&head[..filled]);
+        filled <<= 1;
+    }
+}
+
+/// In-place radix-2 Walsh-Hadamard transform over the first `k` elements
+/// (`k` must be a power of two); elements at index `>= k` are left untouched.
+///
+/// Used as the small `O(k log k)` core of both [`fwht_in_truncated`] (the
+/// `k`-periodic input block) and [`eval_poly_out_truncated`]'s output-truncation
+/// fold.
+///
+/// [`eval_poly_out_truncated`]: crate::engine::utils::eval_poly_out_truncated
+#[inline(always)]
+pub(crate) fn wht_pow2(data: &mut [GfElement; GF_ORDER], k: usize) {
+    let mut dist = 1;
+    while dist < k {
+        for r in (0..k).step_by(dist * 2) {
+            for offset in r..r + dist {
+                let (sum, dif) = fwht_2(data[offset], data[offset + dist]);
+                data[offset] = sum;
+                data[offset + dist] = dif;
+            }
+        }
+        dist <<= 1;
+    }
+}
+
 // ======================================================================
 // FWHT - PRIVATE
 
@@ -145,6 +203,65 @@ mod tests {
             fwht_naive(&mut data2);
 
             assert_eq!(data1, data2);
+        }
+    }
+
+    #[test]
+    fn test_in_truncated() {
+        let mut rng = ChaCha8Rng::from_seed([0; 32]);
+        let random: Vec<GfElement> = (0..GF_ORDER).map(|_| rng.random()).collect();
+
+        for nonzero_count in [
+            0,
+            1,
+            2,
+            3,
+            4,
+            42,
+            64,
+            127,
+            16384 - 1,
+            16384 + 1,
+            GF_ORDER / 2 - 1,
+            GF_ORDER / 2,
+            GF_ORDER / 2 + 1,
+            GF_ORDER - 4,
+            GF_ORDER - 3,
+            GF_ORDER - 2,
+            GF_ORDER - 1,
+            GF_ORDER,
+        ] {
+            let mut data1 = [0; GF_ORDER];
+
+            data1[..nonzero_count].copy_from_slice(&random[..nonzero_count]);
+            let mut data2 = data1;
+
+            fwht_in_truncated(&mut data1, nonzero_count);
+            fwht_naive(&mut data2);
+
+            assert_eq!(data1, data2, "mismatch for nonzero_count = {nonzero_count}");
+        }
+    }
+
+    #[test]
+    fn test_wht_pow2() {
+        let mut rng = ChaCha8Rng::from_seed([0; 32]);
+        let random: Vec<GfElement> = (0..GF_ORDER).map(|_| rng.random()).collect();
+
+        // For a power-of-two `k`, the `k`-point WHT of the leading `k` elements
+        // equals the first `k` outputs of the full WHT of the zero-padded input
+        // (the WHT output is `k`-periodic, see `fwht_in_truncated`).
+        let mut k = 1;
+        while k <= GF_ORDER {
+            let mut data1 = [0; GF_ORDER];
+            data1[..k].copy_from_slice(&random[..k]);
+            let mut data2 = data1;
+
+            wht_pow2(&mut data1, k);
+            fwht_naive(&mut data2);
+
+            assert_eq!(data1[..k], data2[..k], "mismatch for k = {k}");
+            k <<= 1;
         }
     }
 }
