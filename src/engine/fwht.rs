@@ -47,17 +47,7 @@ pub(crate) fn fwht_in_truncated(data: &mut [GfElement; GF_ORDER], truncated_size
 
     // Full radix-2 WHT over the `k` leading elements (`data[truncated_size..k]`
     // is already zero).
-    let mut dist = 1;
-    while dist < k {
-        for r in (0..k).step_by(dist * 2) {
-            for offset in r..r + dist {
-                let (sum, dif) = fwht_2(data[offset], data[offset + dist]);
-                data[offset] = sum;
-                data[offset + dist] = dif;
-            }
-        }
-        dist <<= 1;
-    }
+    wht_pow2(data, k);
 
     // The full WHT output is periodic with period `k`; replicate the block by
     // repeated doubling (`k` and `GF_ORDER` are both powers of two).
@@ -69,36 +59,16 @@ pub(crate) fn fwht_in_truncated(data: &mut [GfElement; GF_ORDER], truncated_size
     }
 }
 
-/// Decimation in time (DIT) Fast Walsh-Hadamard Transform that only computes
-/// the first `output_count` outputs (rounded up to a power of two); the rest of
-/// `data` is left in an unspecified state.
+/// In-place radix-2 Walsh-Hadamard transform over the first `k` elements
+/// (`k` must be a power of two); elements at index `>= k` are left untouched.
 ///
-/// Unlike [`fwht`], this assumes `data` is fully populated (no input
-/// truncation). The WHT is a tensor power, so zeroing the high-order index bits
-/// of the output equals GF-summing the input over those bits. We therefore fold
-/// `data` down to `k = output_count.next_power_of_two()` elements in `O(GF_ORDER)`
-/// and run a full WHT over just those, in `O(k log k)`. The first `output_count`
-/// outputs equal [`fwht`]'s mod `GF_MODULUS`; the two evaluation orders may
-/// pick different encodings of zero (`0` vs `GF_MODULUS`), which all consumers
-/// of the transform treat identically.
+/// Used as the small `O(k log k)` core of both [`fwht_in_truncated`] (the
+/// `k`-periodic input block) and [`eval_poly_out_truncated`]'s output-truncation
+/// fold.
+///
+/// [`eval_poly_out_truncated`]: crate::engine::utils::eval_poly_out_truncated
 #[inline(always)]
-pub(crate) fn fwht_out_truncated(data: &mut [GfElement; GF_ORDER], output_count: usize) {
-    let k = output_count.next_power_of_two();
-
-    if k >= GF_ORDER {
-        fwht(data, GF_ORDER);
-        return;
-    }
-
-    // Fold the high-order index bits by GF-summing strided groups:
-    //   fold[i] = Σ_q data[q * k + i]   for i in 0..k
-    for base in (k..GF_ORDER).step_by(k) {
-        for i in 0..k {
-            data[i] = utils::add_mod(data[i], data[base + i]);
-        }
-    }
-
-    // Full radix-2 WHT over the `k` folded elements.
+pub(crate) fn wht_pow2(data: &mut [GfElement; GF_ORDER], k: usize) {
     let mut dist = 1;
     while dist < k {
         for r in (0..k).step_by(dist * 2) {
@@ -148,7 +118,6 @@ fn fwht_4(data: &mut [GfElement; GF_ORDER], offset: u16, dist: u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::GF_MODULUS;
     #[cfg(not(feature = "std"))]
     use alloc::vec::Vec;
     use rand::{Rng, SeedableRng};
@@ -275,50 +244,24 @@ mod tests {
     }
 
     #[test]
-    fn test_out_truncated() {
+    fn test_wht_pow2() {
         let mut rng = ChaCha8Rng::from_seed([0; 32]);
-        let random: [GfElement; GF_ORDER] = [(); GF_ORDER].map(|_| rng.random());
+        let random: Vec<GfElement> = (0..GF_ORDER).map(|_| rng.random()).collect();
 
-        // Outputs are only canonical mod GF_MODULUS: `0` and `GF_MODULUS` both
-        // encode zero, and the two evaluation orders may pick different
-        // encodings, so compare canonicalized values.
-        let canonical = |x: GfElement| if x == GF_MODULUS { 0 } else { x };
+        // For a power-of-two `k`, the `k`-point WHT of the leading `k` elements
+        // equals the first `k` outputs of the full WHT of the zero-padded input
+        // (the WHT output is `k`-periodic, see `fwht_in_truncated`).
+        let mut k = 1;
+        while k <= GF_ORDER {
+            let mut data1 = [0; GF_ORDER];
+            data1[..k].copy_from_slice(&random[..k]);
+            let mut data2 = data1;
 
-        for output_count in [
-            0,
-            1,
-            2,
-            3,
-            4,
-            42,
-            64,
-            127,
-            16384 - 1,
-            16384 + 1,
-            GF_ORDER / 2,
-            GF_ORDER - 1,
-            GF_ORDER,
-        ] {
-            let mut full = random;
-            let mut truncated = random;
+            wht_pow2(&mut data1, k);
+            fwht_naive(&mut data2);
 
-            fwht(&mut full, GF_ORDER);
-            fwht_out_truncated(&mut truncated, output_count);
-
-            // The first `output_count` outputs must match the full transform.
-            assert_eq!(
-                full[..output_count]
-                    .iter()
-                    .copied()
-                    .map(canonical)
-                    .collect::<Vec<_>>(),
-                truncated[..output_count]
-                    .iter()
-                    .copied()
-                    .map(canonical)
-                    .collect::<Vec<_>>(),
-                "mismatch for output_count = {output_count}"
-            );
+            assert_eq!(data1[..k], data2[..k], "mismatch for k = {k}");
+            k <<= 1;
         }
     }
 }
