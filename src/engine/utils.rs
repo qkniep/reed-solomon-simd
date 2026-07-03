@@ -9,13 +9,6 @@ use core::iter::zip;
 // FUNCTIONS - PUBLIC
 
 /// Evaluate Polynomial using Fast Walsh-Hadamard Transform (FWHT).
-///
-/// This function is designed to be inlined and be compiled with SIMD
-/// features enabled within an Engine's implementation of `eval_poly`.
-///
-/// See [`Avx2`] for an example on how to do this.
-///
-/// [`Avx2`]: crate::engine::Avx2
 #[inline(always)]
 pub fn eval_poly(erasures: &mut [GfElement; GF_ORDER], truncated_size: usize) {
     eval_poly_out_truncated(erasures, truncated_size, GF_ORDER);
@@ -29,6 +22,14 @@ pub fn eval_poly(erasures: &mut [GfElement; GF_ORDER], truncated_size: usize) {
 /// truncation of the first transform); `output_count` is the number of leading
 /// outputs the caller actually reads. Decoding only reads a prefix of the
 /// result, so this avoids the otherwise-fixed full `GF_ORDER` final transform.
+///
+/// This function is designed to be inlined and be compiled with SIMD
+/// features enabled within an Engine's implementation of
+/// `eval_poly_out_truncated`.
+///
+/// See [`Avx2`] for an example on how to do this.
+///
+/// [`Avx2`]: crate::engine::Avx2
 #[inline(always)]
 pub fn eval_poly_out_truncated(
     erasures: &mut [GfElement; GF_ORDER],

@@ -74,6 +74,10 @@ impl Engine for Avx2 {
         }
     }
 
+    fn eval_poly(erasures: &mut [GfElement; GF_ORDER], truncated_size: usize) {
+        Self::eval_poly_out_truncated(erasures, truncated_size, GF_ORDER);
+    }
+
     fn eval_poly_out_truncated(
         erasures: &mut [GfElement; GF_ORDER],
         truncated_size: usize,

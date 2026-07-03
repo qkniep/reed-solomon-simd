@@ -33,7 +33,9 @@ pub(crate) fn fwht(data: &mut [GfElement; GF_ORDER], m_truncated: usize) {
 /// of the output equals GF-summing the input over those bits. We therefore fold
 /// `data` down to `k = output_count.next_power_of_two()` elements in `O(GF_ORDER)`
 /// and run a full WHT over just those, in `O(k log k)`. The first `output_count`
-/// outputs are bit-identical to [`fwht`]'s.
+/// outputs equal [`fwht`]'s mod `GF_MODULUS`; the two evaluation orders may
+/// pick different encodings of zero (`0` vs `GF_MODULUS`), which all consumers
+/// of the transform treat identically.
 #[inline(always)]
 pub(crate) fn fwht_out_truncated(data: &mut [GfElement; GF_ORDER], output_count: usize) {
     let k = output_count.next_power_of_two();
@@ -101,6 +103,7 @@ fn fwht_4(data: &mut [GfElement; GF_ORDER], offset: u16, dist: u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::GF_MODULUS;
     #[cfg(not(feature = "std"))]
     use alloc::vec::Vec;
     use rand::{Rng, SeedableRng};
@@ -194,6 +197,11 @@ mod tests {
         let mut rng = ChaCha8Rng::from_seed([0; 32]);
         let random: [GfElement; GF_ORDER] = [(); GF_ORDER].map(|_| rng.random());
 
+        // Outputs are only canonical mod GF_MODULUS: `0` and `GF_MODULUS` both
+        // encode zero, and the two evaluation orders may pick different
+        // encodings, so compare canonicalized values.
+        let canonical = |x: GfElement| if x == GF_MODULUS { 0 } else { x };
+
         for output_count in [
             0,
             1,
@@ -217,8 +225,16 @@ mod tests {
 
             // The first `output_count` outputs must match the full transform.
             assert_eq!(
-                full[..output_count],
-                truncated[..output_count],
+                full[..output_count]
+                    .iter()
+                    .copied()
+                    .map(canonical)
+                    .collect::<Vec<_>>(),
+                truncated[..output_count]
+                    .iter()
+                    .copied()
+                    .map(canonical)
+                    .collect::<Vec<_>>(),
                 "mismatch for output_count = {output_count}"
             );
         }
