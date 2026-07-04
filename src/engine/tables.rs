@@ -24,6 +24,8 @@ use alloc::boxed::Box;
 #[cfg(not(feature = "std"))]
 use alloc::vec;
 #[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+#[cfg(not(feature = "std"))]
 use once_cell::race::OnceBox;
 #[cfg(feature = "std")]
 use std::sync::LazyLock;
@@ -120,6 +122,39 @@ pub fn get_log_walsh() -> &'static LogWalsh {
         static LOG_WALSH: OnceBox<LogWalsh> = OnceBox::new();
         LOG_WALSH.get_or_init(initialize_log_walsh)
     }
+}
+
+/// Folded [`LogWalsh`] tables, one per power-of-two period `k` (`1 ..= GF_ORDER/2`).
+///
+/// Level `j` holds `S_k` for `k = 1 << j`, where
+/// `S_k[i] = Σ_q log_walsh[q*k + i]` (sum over `q = 0 .. GF_ORDER/k`, in the
+/// `Z/GF_MODULUS` arithmetic of [`utils::add_mod`]). `S_k` is the per-period
+/// fold of [`LogWalsh`] and is what [`eval_poly_out_truncated`]'s factorized
+/// fold multiplies by when the (input-truncated) erasure spectrum is periodic
+/// with period `k` — collapsing an `O(GF_ORDER)` pass to `O(k)`.
+///
+/// [`utils::add_mod`]: crate::engine::utils
+/// [`eval_poly_out_truncated`]: crate::engine::utils::eval_poly_out_truncated
+type LogWalshFolded = [Box<[GfElement]>; GF_BITS];
+
+/// Returns the folded log-Walsh table `S_k` for power-of-two `k` in
+/// `1 ..= GF_ORDER/2` (see [`LogWalshFolded`]). `k` must be a power of two
+/// strictly less than [`GF_ORDER`].
+pub(crate) fn get_log_walsh_folded(k: usize) -> &'static [GfElement] {
+    debug_assert!(k.is_power_of_two() && k < GF_ORDER);
+
+    #[cfg(feature = "std")]
+    let folded: &'static LogWalshFolded = {
+        static FOLDED: LazyLock<LogWalshFolded> = LazyLock::new(initialize_log_walsh_folded);
+        &FOLDED
+    };
+    #[cfg(not(feature = "std"))]
+    let folded: &'static LogWalshFolded = {
+        static FOLDED: OnceBox<LogWalshFolded> = OnceBox::new();
+        FOLDED.get_or_init(|| Box::new(initialize_log_walsh_folded()))
+    };
+
+    &folded[k.trailing_zeros() as usize]
 }
 
 /// Lazily initialized multiplication table for the `NoSimd` engine.
@@ -230,6 +265,45 @@ fn initialize_log_walsh() -> Box<LogWalsh> {
     fwht::fwht(log_walsh.as_mut(), GF_ORDER);
 
     log_walsh
+}
+
+fn initialize_log_walsh_folded() -> LogWalshFolded {
+    // Build `S_k` for every power-of-two period `k = 1 << j` via the doubling
+    // recurrence `S_k[i] = add_mod(S_{2k}[i], S_{2k}[i + k])`, seeded from
+    // `S_GF_ORDER = log_walsh` (the `q = 0 .. 1` fold, i.e. the table itself).
+    let log_walsh = get_log_walsh();
+
+    // Highest stored level is `k = GF_ORDER / 2` (`j = GF_BITS - 1`); seed it
+    // directly from `log_walsh` (which is `S_GF_ORDER`).
+    let mut levels: Vec<Box<[GfElement]>> = Vec::with_capacity(GF_BITS);
+
+    let mut prev: Box<[GfElement]> = {
+        let k = GF_ORDER / 2;
+        let mut s = vec![0; k].into_boxed_slice();
+        for (i, s_i) in s.iter_mut().enumerate() {
+            *s_i = utils::add_mod(log_walsh[i], log_walsh[i + k]);
+        }
+        s
+    };
+    levels.push(prev.clone());
+
+    let mut k = GF_ORDER / 4;
+    while k >= 1 {
+        let mut s = vec![0; k].into_boxed_slice();
+        for (i, s_i) in s.iter_mut().enumerate() {
+            *s_i = utils::add_mod(prev[i], prev[i + k]);
+        }
+        levels.push(s.clone());
+        prev = s;
+        k >>= 1;
+    }
+
+    // `levels` is currently ordered k = GF_ORDER/2, /4, ..., 1; reverse so that
+    // index `j` holds `k = 1 << j`.
+    levels.reverse();
+    levels
+        .try_into()
+        .unwrap_or_else(|_| unreachable!("built exactly GF_BITS levels"))
 }
 
 fn initialize_mul16() -> Box<Mul16> {
