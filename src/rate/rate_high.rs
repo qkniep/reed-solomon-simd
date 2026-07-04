@@ -247,7 +247,19 @@ impl<E: Engine> RateDecoder<E> for HighRateDecoder<E> {
         self.engine
             .ifft(&mut work, 0, work_count, ifft_truncated, 0);
         engine::formal_derivative(&mut work);
-        self.engine.fft(&mut work, 0, work_count, original_end, 0);
+
+        // The FFT output is only consumed at the missing original positions
+        // (REVEAL ERASURES below, and `DecoderResult` reads only restored
+        // shards). `Engine::fft` guarantees outputs below `truncated_size`
+        // are valid regardless of the data above it, so clamp the FFT to
+        // 1 + the highest missing original. Mirror of the IFFT truncation:
+        // this one is a large saving when the high-index originals were
+        // received (e.g. only low-index shards lost).
+        let fft_truncated = (chunk_size..original_end)
+            .rev()
+            .find(|&i| !received[i])
+            .map_or(0, |i| i + 1);
+        self.engine.fft(&mut work, 0, work_count, fft_truncated, 0);
 
         // REVEAL ERASURES
 
