@@ -182,26 +182,43 @@ impl<E: Engine> RateDecoder<E> for LowRateDecoder<E> {
         let work_count = work.len();
 
         // ERASURE LOCATIONS
+        //
+        // The erasure-locator `e` is dense: its tail `e[recovery_end..]` is all
+        // ones (the never-generated recovery positions), which would force
+        // `eval_poly` to run a full `O(GF_ORDER)` transform over the whole field.
+        //
+        // Instead build the RECEIVED indicator `r = all_ones - e`. `r` is
+        // non-zero only in `[0, recovery_end)` — received originals, the known
+        // zero-pad gap `[original_count, chunk_size)`, and received recovery — so
+        // its `eval_poly` is input-truncated and hits the `O(k)` fast path.
+        // `eval_poly` is linear over `Z/GF_MODULUS` and `eval_poly(all_ones)[i]`
+        // is the constant `log_walsh[0]`, so the locator values are recovered by
+        // complementing: `eval_poly(e)[i] = log_walsh[0] - eval_poly(r)[i]`.
 
         let mut erasures = [0; GF_ORDER];
 
         for i in 0..original_count {
-            if !received[i] {
+            if received[i] {
                 erasures[i] = 1;
             }
         }
+
+        erasures[original_count..chunk_size].fill(1);
 
         for i in chunk_size..recovery_end {
-            if !received[i] {
+            if received[i] {
                 erasures[i] = 1;
             }
         }
 
-        erasures[recovery_end..].fill(1);
+        // EVALUATE POLYNOMIAL (received-indicator, then complement in place)
 
-        // EVALUATE POLYNOMIAL
+        E::eval_poly_out_truncated(&mut erasures, recovery_end, recovery_end);
 
-        E::eval_poly_out_truncated(&mut erasures, GF_ORDER, recovery_end);
+        let log_walsh0 = engine::tables::get_log_walsh()[0];
+        for e in &mut erasures[..recovery_end] {
+            *e = engine::utils::sub_mod(log_walsh0, *e);
+        }
 
         // MULTIPLY SHARDS
 

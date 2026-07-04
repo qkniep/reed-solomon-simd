@@ -35,15 +35,49 @@ pub fn eval_poly_out_truncated(
     truncated_size: usize,
     output_count: usize,
 ) {
-    let log_walsh = tables::get_log_walsh();
-
-    fwht::fwht_in_truncated(erasures, truncated_size);
-
-    // The pointwise multiply by `log_walsh` and the output-truncation fold are
-    // both `O(GF_ORDER)` passes. Fuse them: accumulate each element's product
-    // straight into the first `k` outputs, instead of a full multiply pass
-    // followed by a separate fold pass.
     let k = output_count.next_power_of_two();
+    let k_in = truncated_size.next_power_of_two();
+
+    // FAST PATH — periodic erasure spectrum (the HighRate decode shape).
+    //
+    // With only `truncated_size` non-zero leading inputs, the input WHT is
+    // periodic with period `k_in` (see `fwht_in_truncated`): `W[j] = W[j % k_in]`.
+    // When `k_in <= k < GF_ORDER`, the truncated-output fold factorizes. Every
+    // term folded into output `i` reads the same periodic input value `W[i]`, so
+    //
+    //   out[i] = Σ_q W[i] · log_walsh[q·k + i] = W[i] · S_k[i]
+    //
+    // because the fold arithmetic lives in `Z/GF_MODULUS`, where multiplication
+    // distributes over the sum. `S_k[i] = Σ_q log_walsh[q·k + i]` is precomputed
+    // (`tables::get_log_walsh_folded`). This replaces the two `O(GF_ORDER)` passes
+    // (replicate-to-`GF_ORDER` + fold) with one `O(k)` multiply.
+    if k < GF_ORDER && k_in <= k {
+        // Input WHT over the non-zero region (`erasures[truncated_size..k_in]`
+        // is already zero).
+        fwht::wht_pow2(erasures, k_in);
+
+        // Materialize the `k_in`-periodic block up to period `k` so the multiply
+        // below is contiguous (no-op in the common `k_in == k` case).
+        let mut filled = k_in;
+        while filled < k {
+            let (head, tail) = erasures[..k].split_at_mut(filled);
+            tail[..filled].copy_from_slice(&head[..filled]);
+            filled <<= 1;
+        }
+
+        let s_k = tables::get_log_walsh_folded(k);
+        for (e, factor) in zip(erasures[..k].iter_mut(), s_k.iter()) {
+            *e = mul_mod(*e, *factor);
+        }
+
+        // Full radix-2 WHT over the `k` folded elements.
+        fwht::wht_pow2(erasures, k);
+        return;
+    }
+
+    // SLOW PATH — dense input (LowRate decode) or no output truncation.
+    let log_walsh = tables::get_log_walsh();
+    fwht::fwht_in_truncated(erasures, truncated_size);
 
     if k >= GF_ORDER {
         // No output truncation: multiply in place, then run the full transform.
@@ -165,6 +199,12 @@ mod tests {
 
     // Un-fused reference: input transform, full pointwise multiply, output
     // transform, with no truncation.
+    //
+    // Note: the fast path is only guaranteed equal to this reference *modulo
+    // `GF_MODULUS`* (`0` and `GF_MODULUS` are interchangeable representatives,
+    // and decode treats them identically since `exp[GF_MODULUS] == exp[0]`).
+    // The raw-`u16` assertion below is therefore stronger than the algebra
+    // strictly guarantees, but holds for these inputs.
     fn eval_poly_reference(erasures: &mut [GfElement; GF_ORDER]) {
         let log_walsh = tables::get_log_walsh();
         fwht::fwht(erasures, GF_ORDER);
@@ -181,11 +221,16 @@ mod tests {
 
         for (truncated_size, output_count) in [
             (1, 1),
-            (64, 64),
-            (128, 128),
-            (200, 200),
+            (32, 32),   // HighRate 32:32 (k = 64)
+            (64, 64),   // HighRate 64:64 (k = 128)
+            (128, 128), // HighRate 128:128 (k = 256)
+            (200, 200), // truncated_size < k == k_in
+            (256, 256),
+            (320, 320),     // HighRate 64:192 (k = 512)
+            (100, 256),     // k_in (128) < k (256): periodic replicate
             (256, 64),      // output smaller than input
             (64, 256),      // output larger than input
+            (32768, 32768), // largest fast-path k (k = 32768 < GF_ORDER)
             (GF_ORDER, 64), // dense input, truncated output (LowRate shape)
             (64, GF_ORDER), // truncated input, full output
             (GF_ORDER, GF_ORDER),
