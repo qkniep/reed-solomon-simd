@@ -86,6 +86,19 @@ impl Engine for DefaultEngine {
         self.0.ifft(data, pos, size, truncated_size, skew_delta);
     }
 
+    fn fft_out_window(
+        &self,
+        data: &mut ShardsRefMut,
+        pos: usize,
+        size: usize,
+        truncated_size: usize,
+        output_start: usize,
+        skew_delta: usize,
+    ) {
+        self.0
+            .fft_out_window(data, pos, size, truncated_size, output_start, skew_delta);
+    }
+
     fn mul(&self, x: &mut [[u8; 64]], log_m: GfElement) {
         self.0.mul(x, log_m);
     }

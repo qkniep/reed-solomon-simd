@@ -48,12 +48,27 @@ impl Engine for Naive {
         truncated_size: usize,
         skew_delta: usize,
     ) {
+        self.fft_out_window(data, pos, size, truncated_size, 0, skew_delta);
+    }
+
+    fn fft_out_window(
+        &self,
+        data: &mut ShardsRefMut,
+        pos: usize,
+        size: usize,
+        truncated_size: usize,
+        output_start: usize,
+        skew_delta: usize,
+    ) {
         debug_assert!(size.is_power_of_two());
         debug_assert!(truncated_size <= size);
+        debug_assert!(output_start <= truncated_size);
 
         let mut dist = size / 2;
         while dist > 0 {
-            let mut r = 0;
+            // Blocks of `dist * 2` entirely below `output_start` only affect
+            // outputs there, so skip them.
+            let mut r = output_start & !(dist * 2 - 1);
             while r < truncated_size {
                 let log_m = self.skew[r + dist + skew_delta - 1];
                 for i in r..r + dist {

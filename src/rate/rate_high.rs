@@ -250,16 +250,18 @@ impl<E: Engine> RateDecoder<E> for HighRateDecoder<E> {
 
         // The FFT output is only consumed at the missing original positions
         // (REVEAL ERASURES below, and `DecoderResult` reads only restored
-        // shards). `Engine::fft` guarantees outputs below `truncated_size`
-        // are valid regardless of the data above it, so clamp the FFT to
-        // 1 + the highest missing original. Mirror of the IFFT truncation:
-        // this one is a large saving when the high-index originals were
-        // received (e.g. only low-index shards lost).
+        // shards). Those all lie in `chunk_size..original_end`, so restrict
+        // the FFT output window to 1 + the highest missing original at the
+        // top (mirror of the IFFT truncation: a large saving when the
+        // high-index originals were received) and to `chunk_size` at the
+        // bottom (the recovery region below is never read; a fixed saving
+        // for every loss pattern).
         let fft_truncated = (chunk_size..original_end)
             .rev()
             .find(|&i| !received[i])
             .map_or(0, |i| i + 1);
-        self.engine.fft(&mut work, 0, work_count, fft_truncated, 0);
+        self.engine
+            .fft_out_window(&mut work, 0, work_count, fft_truncated, chunk_size, 0);
 
         // REVEAL ERASURES
 
