@@ -51,7 +51,21 @@ impl Engine for Avx2 {
         skew_delta: usize,
     ) {
         unsafe {
-            self.fft_private_avx2(data, pos, size, truncated_size, skew_delta);
+            self.fft_private_avx2(data, pos, size, truncated_size, 0, skew_delta);
+        }
+    }
+
+    fn fft_out_window(
+        &self,
+        data: &mut ShardsRefMut,
+        pos: usize,
+        size: usize,
+        truncated_size: usize,
+        output_start: usize,
+        skew_delta: usize,
+    ) {
+        unsafe {
+            self.fft_private_avx2(data, pos, size, truncated_size, output_start, skew_delta);
         }
     }
 
@@ -290,10 +304,11 @@ impl Avx2 {
         pos: usize,
         size: usize,
         truncated_size: usize,
+        output_start: usize,
         skew_delta: usize,
     ) {
         // Drop unsafe privileges
-        self.fft_private(data, pos, size, truncated_size, skew_delta);
+        self.fft_private(data, pos, size, truncated_size, output_start, skew_delta);
     }
 
     #[inline(always)]
@@ -303,6 +318,7 @@ impl Avx2 {
         pos: usize,
         size: usize,
         truncated_size: usize,
+        output_start: usize,
         skew_delta: usize,
     ) {
         // TWO LAYERS AT TIME
@@ -310,7 +326,9 @@ impl Avx2 {
         let mut dist4 = size;
         let mut dist = size >> 2;
         while dist != 0 {
-            let mut r = 0;
+            // Blocks of `dist4` entirely below `output_start` only affect
+            // outputs there, so skip them.
+            let mut r = output_start & !(dist4 - 1);
             while r < truncated_size {
                 let base = r + dist + skew_delta - 1;
 
@@ -331,7 +349,7 @@ impl Avx2 {
         // FINAL ODD LAYER
 
         if dist4 == 2 {
-            let mut r = 0;
+            let mut r = output_start & !1;
             while r < truncated_size {
                 let log_m = self.skew[r + skew_delta];
 

@@ -151,6 +151,27 @@ pub trait Engine {
     // ============================================================
     // PROVIDED
 
+    /// Same as [`Engine::fft`], except that afterwards only
+    /// `data[pos + output_start .. pos + truncated_size]` is guaranteed
+    /// to contain valid FFT result; the rest of `data[pos .. pos + size]`
+    /// may contain garbage.
+    ///
+    /// Implementations can override this to skip butterflies which only
+    /// affect outputs below `output_start`. The default implementation
+    /// ignores `output_start` and behaves exactly like [`Engine::fft`].
+    fn fft_out_window(
+        &self,
+        data: &mut ShardsRefMut,
+        pos: usize,
+        size: usize,
+        truncated_size: usize,
+        output_start: usize,
+        skew_delta: usize,
+    ) {
+        let _ = output_start;
+        self.fft(data, pos, size, truncated_size, skew_delta);
+    }
+
     /// Evaluate polynomial.
     fn eval_poly(erasures: &mut [GfElement; GF_ORDER], truncated_size: usize)
     where
