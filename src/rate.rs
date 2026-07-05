@@ -228,6 +228,30 @@ where
     // ============================================================
     // PROVIDED
 
+    /// Like [`decode`](Self::decode), but also reconstructs any missing
+    /// recovery shards as a by-product of the decode, avoiding a separate
+    /// re-encode.
+    ///
+    /// The reconstructed recovery shards are read via
+    /// [`DecoderResult::restored_recovery`] and
+    /// [`DecoderResult::restored_recovery_iter`].
+    ///
+    /// Recovery shards are reconstructed **only when a decode actually runs**,
+    /// i.e. when at least one original shard is missing. If all original shards
+    /// are already present this does nothing extra (there is no decode to
+    /// piggyback on) and no recovery shards are reconstructed — encode instead.
+    ///
+    /// The default implementation only restores original shards (identical to
+    /// [`decode`](Self::decode)), so [`DecoderResult::restored_recovery`] then
+    /// always returns `None`. Rate decoders that support in-decode recovery
+    /// reconstruction override this.
+    ///
+    /// [`DecoderResult::restored_recovery`]: crate::DecoderResult::restored_recovery
+    /// [`DecoderResult::restored_recovery_iter`]: crate::DecoderResult::restored_recovery_iter
+    fn decode_with_recovery(&mut self) -> Result<DecoderResult<'_>, Error> {
+        self.decode()
+    }
+
     /// Returns `true` if given `original_count` / `recovery_count`
     /// combination is supported.
     ///

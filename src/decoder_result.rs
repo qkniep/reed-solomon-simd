@@ -27,6 +27,31 @@ impl DecoderResult<'_> {
     pub fn restored_original_iter(&self) -> RestoredOriginal<'_> {
         RestoredOriginal::new(self.work)
     }
+
+    /// Returns reconstructed recovery shard with given `index`
+    /// or `None` if given `index` doesn't correspond to
+    /// a missing recovery shard that was reconstructed.
+    ///
+    /// This only ever returns shards when decoding was done with
+    /// [`RateDecoder::decode_with_recovery`] (or
+    /// [`ReedSolomonDecoder::decode_with_recovery`]) and the missing recovery
+    /// shard was actually reconstructed. It always returns `None` after a
+    /// plain [`decode`](crate::rate::RateDecoder::decode).
+    ///
+    /// [`RateDecoder::decode_with_recovery`]: crate::rate::RateDecoder::decode_with_recovery
+    /// [`ReedSolomonDecoder::decode_with_recovery`]: crate::ReedSolomonDecoder::decode_with_recovery
+    pub fn restored_recovery(&self, index: usize) -> Option<&[u8]> {
+        self.work.restored_recovery(index)
+    }
+
+    /// Returns iterator over all reconstructed recovery shards
+    /// and their indexes, ordered by indexes.
+    ///
+    /// This is empty unless decoding was done with
+    /// [`RateDecoder::decode_with_recovery`](crate::rate::RateDecoder::decode_with_recovery).
+    pub fn restored_recovery_iter(&self) -> RestoredRecovery<'_> {
+        RestoredRecovery::new(self.work)
+    }
 }
 
 // ======================================================================
@@ -104,6 +129,69 @@ impl<'a> RestoredOriginal<'a> {
     pub(crate) fn new(work: &'a DecoderWork) -> Self {
         Self {
             remaining: work.missing_original_count(),
+            next_index: 0,
+            work,
+        }
+    }
+}
+
+// ======================================================================
+// RestoredRecovery - PUBLIC
+
+/// Iterator over reconstructed recovery shards and their indexes.
+///
+/// This struct is created by [`DecoderResult::restored_recovery_iter`].
+pub struct RestoredRecovery<'a> {
+    remaining: usize,
+    next_index: usize,
+    work: &'a DecoderWork,
+}
+
+// ======================================================================
+// RestoredRecovery - IMPL Iterator
+
+impl<'a> Iterator for RestoredRecovery<'a> {
+    type Item = (usize, &'a [u8]);
+    fn next(&mut self) -> Option<(usize, &'a [u8])> {
+        if self.remaining == 0 {
+            return None;
+        }
+
+        let mut index = self.next_index;
+        while index < self.work.recovery_count() {
+            if let Some(recovery) = self.work.restored_recovery(index) {
+                self.next_index = index + 1;
+                self.remaining -= 1;
+                return Some((index, recovery));
+            }
+            index += 1;
+        }
+
+        debug_assert!(
+            false,
+            "Inconsistency in internal data structures. Please report."
+        );
+
+        None
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+// ======================================================================
+// RestoredRecovery - IMPL ExactSizeIterator
+
+impl ExactSizeIterator for RestoredRecovery<'_> {}
+
+// ======================================================================
+// RestoredRecovery - CRATE
+
+impl<'a> RestoredRecovery<'a> {
+    pub(crate) fn new(work: &'a DecoderWork) -> Self {
+        Self {
+            remaining: work.missing_recovery_count(),
             next_index: 0,
             work,
         }

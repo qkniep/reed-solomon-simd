@@ -21,7 +21,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 pub use crate::{
-    decoder_result::{DecoderResult, RestoredOriginal},
+    decoder_result::{DecoderResult, RestoredOriginal, RestoredRecovery},
     encoder_result::{EncoderResult, Recovery},
     reed_solomon::{ReedSolomonDecoder, ReedSolomonEncoder},
 };

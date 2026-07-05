@@ -170,10 +170,50 @@ impl<E: Engine> RateDecoder<E> for LowRateDecoder<E> {
     }
 
     fn decode(&mut self) -> Result<DecoderResult<'_>, Error> {
+        self.decode_internal(false)
+    }
+
+    fn decode_with_recovery(&mut self) -> Result<DecoderResult<'_>, Error> {
+        self.decode_internal(true)
+    }
+
+    fn into_parts(self) -> (E, DecoderWork) {
+        (self.engine, self.work)
+    }
+
+    fn new(
+        original_count: usize,
+        recovery_count: usize,
+        shard_bytes: usize,
+        engine: E,
+        work: Option<DecoderWork>,
+    ) -> Result<Self, Error> {
+        let mut work = work.unwrap_or_default();
+        Self::reset_work(original_count, recovery_count, shard_bytes, &mut work)?;
+        Ok(Self { engine, work })
+    }
+
+    fn reset(
+        &mut self,
+        original_count: usize,
+        recovery_count: usize,
+        shard_bytes: usize,
+    ) -> Result<(), Error> {
+        Self::reset_work(original_count, recovery_count, shard_bytes, &mut self.work)
+    }
+}
+
+// ======================================================================
+// LowRateDecoder - PRIVATE
+
+impl<E: Engine> LowRateDecoder<E> {
+    fn decode_internal(&mut self, reconstruct_recovery: bool) -> Result<DecoderResult<'_>, Error> {
         let Some((mut work, original_count, recovery_count, received)) =
             self.work.decode_begin()?
         else {
-            // Nothing to do, original data is complete.
+            // Nothing to do, original data is complete. Recovery shards are only
+            // reconstructed as a by-product of an actual decode, so there is
+            // nothing to reconstruct here even when `reconstruct_recovery`.
             return Ok(DecoderResult::new(&mut self.work));
         };
 
@@ -244,45 +284,33 @@ impl<E: Engine> RateDecoder<E> for LowRateDecoder<E> {
             }
         }
 
+        // REVEAL RECOVERY ERASURES
+        //
+        // The decode FFT already produced valid outputs across the whole
+        // recovery region (`chunk_size..recovery_end` sits below the FFT's
+        // `recovery_end` truncation), so reconstructing the missing recovery
+        // shards is just the same reveal multiply at those positions — no extra
+        // transform work.
+        if reconstruct_recovery {
+            for i in chunk_size..recovery_end {
+                if !received[i] {
+                    self.engine.mul(&mut work[i], GF_MODULUS - erasures[i]);
+                }
+            }
+        }
+
         // UNDO LAST CHUNK ENCODING
 
         self.work.undo_last_chunk_encoding();
+        if reconstruct_recovery {
+            self.work.finalize_reconstructed_recovery();
+        }
 
         // DONE
 
         Ok(DecoderResult::new(&mut self.work))
     }
 
-    fn into_parts(self) -> (E, DecoderWork) {
-        (self.engine, self.work)
-    }
-
-    fn new(
-        original_count: usize,
-        recovery_count: usize,
-        shard_bytes: usize,
-        engine: E,
-        work: Option<DecoderWork>,
-    ) -> Result<Self, Error> {
-        let mut work = work.unwrap_or_default();
-        Self::reset_work(original_count, recovery_count, shard_bytes, &mut work)?;
-        Ok(Self { engine, work })
-    }
-
-    fn reset(
-        &mut self,
-        original_count: usize,
-        recovery_count: usize,
-        shard_bytes: usize,
-    ) -> Result<(), Error> {
-        Self::reset_work(original_count, recovery_count, shard_bytes, &mut self.work)
-    }
-}
-
-// ======================================================================
-// LowRateDecoder - PRIVATE
-
-impl<E: Engine> LowRateDecoder<E> {
     fn reset_work(
         original_count: usize,
         recovery_count: usize,
@@ -415,6 +443,33 @@ mod tests {
             &[0..32000],
             123
         );
+    }
+
+    // ============================================================
+    // RECOVERY RECONSTRUCTION
+
+    #[test]
+    fn reconstruct_recovery() {
+        for &(oc, rc) in &[(3, 3), (2, 5), (4, 8), (5, 6), (3, 7), (64, 64)] {
+            for shard_bytes in [2, 30, 64, 66, 126, 1024] {
+                for seed in 0..4 {
+                    test_util::fuzz_recovery::<LowRate<_>, _>(
+                        crate::engine::Naive::new,
+                        oc,
+                        rc,
+                        shard_bytes,
+                        seed,
+                    );
+                    test_util::fuzz_recovery::<LowRate<_>, _>(
+                        crate::engine::NoSimd::new,
+                        oc,
+                        rc,
+                        shard_bytes,
+                        seed,
+                    );
+                }
+            }
+        }
     }
 
     // ============================================================

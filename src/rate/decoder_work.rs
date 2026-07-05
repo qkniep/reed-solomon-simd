@@ -24,6 +24,10 @@ pub struct DecoderWork {
     // May contain extra zero bits.
     received: FixedBitSet,
     shards: Shards,
+
+    // Set by `finalize_reconstructed_recovery` when a decode also rebuilt the
+    // missing recovery shards (see `RateDecoder::decode_with_recovery`).
+    recovery_reconstructed: bool,
 }
 
 impl DecoderWork {
@@ -42,6 +46,8 @@ impl DecoderWork {
             recovery_received_count: 0,
             received: FixedBitSet::new(),
             shards: Shards::new(),
+
+            recovery_reconstructed: false,
         }
     }
 }
@@ -165,6 +171,7 @@ impl DecoderWork {
 
         self.original_received_count = 0;
         self.recovery_received_count = 0;
+        self.recovery_reconstructed = false;
 
         let max_received_pos = core::cmp::max(
             original_base_pos + original_count,
@@ -182,6 +189,7 @@ impl DecoderWork {
     pub(crate) fn reset_received(&mut self) {
         self.original_received_count = 0;
         self.recovery_received_count = 0;
+        self.recovery_reconstructed = false;
         self.received.clear();
     }
 
@@ -196,6 +204,22 @@ impl DecoderWork {
         }
     }
 
+    // This must only be called by `DecoderResult`.
+    //
+    // Returns a reconstructed recovery shard, or `None` if `index` is not a
+    // recovery shard that was rebuilt by `decode_with_recovery`. Received
+    // recovery shards are never returned (the caller already has those), and
+    // nothing is returned unless recovery reconstruction actually ran.
+    pub(crate) fn restored_recovery(&self, index: usize) -> Option<&[u8]> {
+        let pos = self.recovery_base_pos + index;
+
+        if self.recovery_reconstructed && index < self.recovery_count && !self.received[pos] {
+            Some(&self.shards[pos].as_flattened()[..self.shard_bytes])
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn undo_last_chunk_encoding(&mut self) {
         self.shards.undo_last_chunk_encoding(
             self.shard_bytes,
@@ -203,7 +227,31 @@ impl DecoderWork {
         );
     }
 
+    // Finalizes recovery shards reconstructed in-place by a decode: undoes the
+    // last-chunk encoding on the recovery slots (mirroring the encoder) and
+    // records that reconstruction happened so `restored_recovery` will report
+    // the results.
+    pub(crate) fn finalize_reconstructed_recovery(&mut self) {
+        self.shards.undo_last_chunk_encoding(
+            self.shard_bytes,
+            self.recovery_base_pos..self.recovery_base_pos + self.recovery_count,
+        );
+        self.recovery_reconstructed = true;
+    }
+
     pub(crate) fn missing_original_count(&self) -> usize {
         self.original_count - self.original_received_count
+    }
+
+    pub(crate) fn missing_recovery_count(&self) -> usize {
+        if self.recovery_reconstructed {
+            self.recovery_count - self.recovery_received_count
+        } else {
+            0
+        }
+    }
+
+    pub(crate) fn recovery_count(&self) -> usize {
+        self.recovery_count
     }
 }

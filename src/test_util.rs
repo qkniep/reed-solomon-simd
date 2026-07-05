@@ -210,6 +210,115 @@ macro_rules! roundtrip_single {
 }
 
 // ======================================================================
+// RATE ENCODER/DECODER - TEST RECOVERY RECONSTRUCTION
+
+// Encodes, drops a random loss pattern (always at least one original, so a
+// decode actually runs, while keeping enough shards to decode), decodes with
+// `decode_with_recovery`, and checks that every missing original AND every
+// missing recovery shard is reconstructed exactly, matching a fresh encode.
+pub(crate) fn fuzz_recovery<R: Rate<E>, E: Engine>(
+    new_engine: fn() -> E,
+    original_count: usize,
+    recovery_count: usize,
+    shard_bytes: usize,
+    seed: u64,
+) {
+    use alloc::collections::BTreeSet;
+
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+
+    let original = generate_original(original_count, shard_bytes, seed as u8);
+
+    let mut encoder = R::encoder(
+        original_count,
+        recovery_count,
+        shard_bytes,
+        new_engine(),
+        None,
+    )
+    .unwrap();
+    for shard in &original {
+        encoder.add_original_shard(shard).unwrap();
+    }
+    let encode_result = encoder.encode().unwrap();
+    let recovery: Vec<Vec<u8>> = encode_result.recovery_iter().map(<[u8]>::to_vec).collect();
+    drop(encode_result);
+
+    // Lose at least one original (so a decode runs) and keep enough shards to
+    // decode: received = (oc - lost_orig) + (rc - lost_rec) >= oc, i.e.
+    // lost_rec <= rc - lost_orig, which needs lost_orig <= rc.
+    let lost_original_count = rng.random_range(1..=core::cmp::min(original_count, recovery_count));
+    let lost_recovery_count = rng.random_range(0..=recovery_count - lost_original_count);
+
+    let lost_original: BTreeSet<usize> =
+        rand::seq::index::sample(&mut rng, original_count, lost_original_count)
+            .iter()
+            .collect();
+    let lost_recovery: BTreeSet<usize> =
+        rand::seq::index::sample(&mut rng, recovery_count, lost_recovery_count)
+            .iter()
+            .collect();
+
+    let mut decoder = R::decoder(
+        original_count,
+        recovery_count,
+        shard_bytes,
+        new_engine(),
+        None,
+    )
+    .unwrap();
+    for (i, shard) in original.iter().enumerate() {
+        if !lost_original.contains(&i) {
+            decoder.add_original_shard(i, shard).unwrap();
+        }
+    }
+    for (i, shard) in recovery.iter().enumerate() {
+        if !lost_recovery.contains(&i) {
+            decoder.add_recovery_shard(i, shard).unwrap();
+        }
+    }
+
+    let result = decoder.decode_with_recovery().unwrap();
+
+    // Every missing original shard is restored.
+    for &i in &lost_original {
+        assert_eq!(
+            result.restored_original(i),
+            Some(original[i].as_slice()),
+            "original {i} (oc={original_count} rc={recovery_count} sb={shard_bytes} seed={seed})",
+        );
+    }
+
+    // Every missing recovery shard is reconstructed; received ones report None.
+    for (i, shard) in recovery.iter().enumerate() {
+        if lost_recovery.contains(&i) {
+            assert_eq!(
+                result.restored_recovery(i),
+                Some(shard.as_slice()),
+                "recovery {i} (oc={original_count} rc={recovery_count} sb={shard_bytes} seed={seed})",
+            );
+        } else {
+            assert_eq!(
+                result.restored_recovery(i),
+                None,
+                "received recovery {i} (oc={original_count} rc={recovery_count} sb={shard_bytes} seed={seed})",
+            );
+        }
+    }
+
+    // The iterator yields exactly the reconstructed recovery shards.
+    let via_iter: BTreeMap<usize, Vec<u8>> = result
+        .restored_recovery_iter()
+        .map(|(i, shard)| (i, shard.to_vec()))
+        .collect();
+    let expected: BTreeMap<usize, Vec<u8>> = lost_recovery
+        .iter()
+        .map(|&i| (i, recovery[i].clone()))
+        .collect();
+    assert_eq!(via_iter, expected);
+}
+
+// ======================================================================
 // RATE ENCODER/DECODER - TEST TWO-ROUND ROUNDTRIP
 
 macro_rules! roundtrip_two_rounds {
