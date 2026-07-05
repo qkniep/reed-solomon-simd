@@ -134,6 +134,28 @@ impl ReedSolomonDecoder {
         self.0.decode()
     }
 
+    /// Like [`decode`](ReedSolomonDecoder::decode), but also reconstructs any
+    /// missing recovery shards as a by-product of the decode, avoiding a
+    /// separate re-encode.
+    ///
+    /// The restored original shards are read as usual from the returned
+    /// [`DecoderResult`]; the reconstructed recovery shards are read via
+    /// [`DecoderResult::restored_recovery`] and
+    /// [`DecoderResult::restored_recovery_iter`].
+    ///
+    /// Recovery shards are reconstructed **only when a decode actually runs**,
+    /// i.e. when at least one original shard is missing. If all original shards
+    /// are already present this does nothing extra and no recovery shards are
+    /// reconstructed — encode instead.
+    ///
+    /// When the returned [`DecoderResult`] is dropped the decoder is
+    /// automatically [`reset`] and ready for a new round of decoding.
+    ///
+    /// [`reset`]: ReedSolomonDecoder::reset
+    pub fn decode_with_recovery(&mut self) -> Result<DecoderResult<'_>, Error> {
+        self.0.decode_with_recovery()
+    }
+
     /// Creates new decoder with given configuration
     /// and allocates required working space.
     ///
@@ -270,6 +292,99 @@ mod tests {
             &[0, 1],
             132,
         );
+    }
+
+    // ==================================================
+    // decode_with_recovery
+
+    #[test]
+    fn decode_with_recovery_reconstructs_missing_recovery() {
+        let shard_bytes = 64;
+        let original = test_util::generate_original(4, shard_bytes, 200);
+
+        let mut encoder = ReedSolomonEncoder::new(4, 4, shard_bytes).unwrap();
+        for o in &original {
+            encoder.add_original_shard(o).unwrap();
+        }
+        let result = encoder.encode().unwrap();
+        let recovery: Vec<Vec<u8>> = result.recovery_iter().map(<[u8]>::to_vec).collect();
+        drop(result);
+
+        // Lose originals {0, 2} and recovery {1, 3}.
+        let mut decoder = ReedSolomonDecoder::new(4, 4, shard_bytes).unwrap();
+        decoder.add_original_shard(1, &original[1]).unwrap();
+        decoder.add_original_shard(3, &original[3]).unwrap();
+        decoder.add_recovery_shard(0, &recovery[0]).unwrap();
+        decoder.add_recovery_shard(2, &recovery[2]).unwrap();
+
+        let result = decoder.decode_with_recovery().unwrap();
+
+        assert_eq!(result.restored_original(0), Some(original[0].as_slice()));
+        assert_eq!(result.restored_original(2), Some(original[2].as_slice()));
+
+        let recovered: BTreeMap<usize, &[u8]> = result.restored_recovery_iter().collect();
+        assert_eq!(recovered.len(), 2);
+        assert_eq!(recovered[&1], recovery[1].as_slice());
+        assert_eq!(recovered[&3], recovery[3].as_slice());
+        assert_eq!(result.restored_recovery(0), None); // received
+        assert_eq!(result.restored_recovery(2), None); // received
+    }
+
+    #[test]
+    fn plain_decode_reports_no_recovery() {
+        let shard_bytes = 64;
+        let original = test_util::generate_original(3, shard_bytes, 201);
+
+        let mut encoder = ReedSolomonEncoder::new(3, 3, shard_bytes).unwrap();
+        for o in &original {
+            encoder.add_original_shard(o).unwrap();
+        }
+        let result = encoder.encode().unwrap();
+        let recovery: Vec<Vec<u8>> = result.recovery_iter().map(<[u8]>::to_vec).collect();
+        drop(result);
+
+        // Lose originals {0, 1} and recovery {2}; decode normally.
+        let mut decoder = ReedSolomonDecoder::new(3, 3, shard_bytes).unwrap();
+        decoder.add_original_shard(2, &original[2]).unwrap();
+        decoder.add_recovery_shard(0, &recovery[0]).unwrap();
+        decoder.add_recovery_shard(1, &recovery[1]).unwrap();
+
+        let result = decoder.decode().unwrap();
+
+        assert_eq!(result.restored_original(0), Some(original[0].as_slice()));
+        assert_eq!(result.restored_original(1), Some(original[1].as_slice()));
+        // Plain `decode` never reconstructs recovery, even though recovery 2 is missing.
+        assert_eq!(result.restored_recovery(2), None);
+        assert_eq!(result.restored_recovery_iter().count(), 0);
+    }
+
+    #[test]
+    fn decode_with_recovery_noop_when_all_originals_present() {
+        let shard_bytes = 64;
+        let original = test_util::generate_original(3, shard_bytes, 202);
+
+        let mut encoder = ReedSolomonEncoder::new(3, 3, shard_bytes).unwrap();
+        for o in &original {
+            encoder.add_original_shard(o).unwrap();
+        }
+        let result = encoder.encode().unwrap();
+        let recovery: Vec<Vec<u8>> = result.recovery_iter().map(<[u8]>::to_vec).collect();
+        drop(result);
+
+        // All originals present, recovery {1, 2} missing — but no decode runs.
+        let mut decoder = ReedSolomonDecoder::new(3, 3, shard_bytes).unwrap();
+        for (i, o) in original.iter().enumerate() {
+            decoder.add_original_shard(i, o).unwrap();
+        }
+        decoder.add_recovery_shard(0, &recovery[0]).unwrap();
+
+        let result = decoder.decode_with_recovery().unwrap();
+
+        // Nothing to decode, so nothing is reconstructed (documented behavior).
+        assert!(result.restored_original_iter().next().is_none());
+        assert_eq!(result.restored_recovery_iter().count(), 0);
+        assert_eq!(result.restored_recovery(1), None);
+        assert_eq!(result.restored_recovery(2), None);
     }
 
     // ==================================================

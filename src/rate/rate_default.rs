@@ -266,6 +266,14 @@ impl<E: Engine> RateDecoder<E> for DefaultRateDecoder<E> {
         }
     }
 
+    fn decode_with_recovery(&mut self) -> Result<DecoderResult<'_>, Error> {
+        match &mut self.0 {
+            InnerDecoder::High(high) => high.decode_with_recovery(),
+            InnerDecoder::Low(low) => low.decode_with_recovery(),
+            InnerDecoder::None => unreachable!(),
+        }
+    }
+
     fn into_parts(self) -> (E, DecoderWork) {
         match self.0 {
             InnerDecoder::High(high) => high.into_parts(),
@@ -374,6 +382,53 @@ mod tests {
                 &[0..core::cmp::min(*original_count, *recovery_count)],
                 *seed,
             );
+        }
+    }
+
+    // ============================================================
+    // RECOVERY RECONSTRUCTION
+
+    #[test]
+    fn reconstruct_recovery() {
+        // Mix of shapes that DefaultRate resolves to high and to low rate.
+        for &(oc, rc) in &[(3, 3), (5, 5), (2, 5), (8, 4), (5, 3), (6, 7), (64, 64)] {
+            for shard_bytes in [2, 30, 64, 66, 126, 1024] {
+                for seed in 0..4 {
+                    test_util::fuzz_recovery::<DefaultRate<_>, _>(
+                        crate::engine::Naive::new,
+                        oc,
+                        rc,
+                        shard_bytes,
+                        seed,
+                    );
+                    test_util::fuzz_recovery::<DefaultRate<_>, _>(
+                        crate::engine::NoSimd::new,
+                        oc,
+                        rc,
+                        shard_bytes,
+                        seed,
+                    );
+                }
+            }
+        }
+    }
+
+    // Multi-chunk shapes (one side far exceeds the other's chunk size) plus a
+    // large equal-count case. NoSimd only, to keep the test fast.
+    #[test]
+    fn reconstruct_recovery_multichunk() {
+        for &(oc, rc) in &[(200, 64), (64, 200), (129, 33), (33, 129), (1000, 1000)] {
+            for shard_bytes in [64, 126, 1024] {
+                for seed in 0..2 {
+                    test_util::fuzz_recovery::<DefaultRate<_>, _>(
+                        crate::engine::NoSimd::new,
+                        oc,
+                        rc,
+                        shard_bytes,
+                        seed,
+                    );
+                }
+            }
         }
     }
 

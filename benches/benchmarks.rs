@@ -147,6 +147,112 @@ fn benchmarks_main(c: &mut Criterion) {
 }
 
 // ======================================================================
+// BENCHMARKS - RECONSTRUCT RECOVERY
+//
+// Compares reconstructing the missing recovery shards *as part of* the decode
+// (`decode_with_recovery`) against the two-step alternative of decoding and
+// then re-encoding the restored originals to regenerate the recovery shards.
+// Both paths end with all original AND all recovery shards known.
+//
+// Loss pattern: lose half of the smaller side, receiving exactly
+// `original_count` shards (the n-of-2n threshold), so both some originals and
+// some recovery shards are missing.
+
+fn benchmarks_reconstruct(c: &mut Criterion) {
+    let mut group = c.benchmark_group("reconstruct");
+
+    for (original_count, recovery_count) in [
+        (32, 32),
+        (64, 64),
+        (128, 128),
+        (256, 256),
+        (512, 512),
+        (1024, 1024),
+        (4096, 4096),
+        (128, 1024),
+        (1024, 128),
+    ] {
+        if original_count >= 1000 && recovery_count >= 1000 {
+            group.sample_size(10);
+        } else {
+            group.sample_size(100);
+        }
+
+        let original = generate_shards(original_count, SHARD_BYTES, 0);
+        let recovery =
+            reed_solomon_simd::encode(original_count, recovery_count, &original).unwrap();
+
+        group.throughput(Throughput::Bytes(
+            ((original_count + recovery_count) * SHARD_BYTES) as u64,
+        ));
+
+        let loss = std::cmp::max(1, std::cmp::min(original_count, recovery_count) / 2);
+        let provided_original_count = original_count - loss;
+        let provided_recovery_count = loss;
+
+        let id = format!("{}:{}", original_count, recovery_count);
+
+        // A) decode_with_recovery: restore missing originals AND rebuild the
+        //    missing recovery shards in a single pass.
+
+        let mut decoder =
+            ReedSolomonDecoder::new(original_count, recovery_count, SHARD_BYTES).unwrap();
+
+        group.bench_with_input(
+            BenchmarkId::new("DecodeWithRecovery", &id),
+            &recovery,
+            |b, recovery| {
+                b.iter(|| {
+                    for index in 0..provided_original_count {
+                        decoder.add_original_shard(index, &original[index]).unwrap();
+                    }
+                    for index in 0..provided_recovery_count {
+                        decoder.add_recovery_shard(index, &recovery[index]).unwrap();
+                    }
+                    black_box(decoder.decode_with_recovery().unwrap());
+                });
+            },
+        );
+
+        // B) decode + manual re-encode: restore missing originals, then feed all
+        //    originals back into an encoder to regenerate the recovery shards.
+
+        let mut decoder =
+            ReedSolomonDecoder::new(original_count, recovery_count, SHARD_BYTES).unwrap();
+        let mut encoder =
+            ReedSolomonEncoder::new(original_count, recovery_count, SHARD_BYTES).unwrap();
+
+        group.bench_with_input(
+            BenchmarkId::new("DecodeThenReencode", &id),
+            &recovery,
+            |b, recovery| {
+                b.iter(|| {
+                    for index in 0..provided_original_count {
+                        decoder.add_original_shard(index, &original[index]).unwrap();
+                    }
+                    for index in 0..provided_recovery_count {
+                        decoder.add_recovery_shard(index, &recovery[index]).unwrap();
+                    }
+                    let result = decoder.decode().unwrap();
+                    for index in 0..original_count {
+                        let shard: &[u8] = if index < provided_original_count {
+                            original[index].as_slice()
+                        } else {
+                            result.restored_original(index).unwrap()
+                        };
+                        encoder.add_original_shard(shard).unwrap();
+                    }
+                    black_box(encoder.encode().unwrap());
+                    drop(result);
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// ======================================================================
 // BENCHMARKS - RATE
 
 fn benchmarks_rate(c: &mut Criterion) {
@@ -383,6 +489,12 @@ fn benchmarks_engine_one<E: Engine>(c: &mut Criterion, name: &str, engine: E) {
 // MAIN
 
 criterion_group!(benches_main, benchmarks_main);
+criterion_group!(benches_reconstruct, benchmarks_reconstruct);
 criterion_group!(benches_rate, benchmarks_rate);
 criterion_group!(benches_engine, benchmarks_engine);
-criterion_main!(benches_main, benches_rate, benches_engine);
+criterion_main!(
+    benches_main,
+    benches_reconstruct,
+    benches_rate,
+    benches_engine
+);
