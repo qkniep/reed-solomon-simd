@@ -5,6 +5,9 @@ use alloc::boxed::Box;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use crate::engine::{Avx2, Ssse3};
 
+#[cfg(all(feature = "gfni", any(target_arch = "x86", target_arch = "x86_64")))]
+use crate::engine::Gfni;
+
 #[cfg(target_arch = "aarch64")]
 use crate::engine::Neon;
 
@@ -18,14 +21,24 @@ impl DefaultEngine {
     /// Creates new [`DefaultEngine`] by chosing and initializing the underlying engine.
     ///
     /// On x86(-64) the engine is chosen in the following order of preference:
-    /// 1. [`Avx2`]
-    /// 2. [`Ssse3`]
-    /// 3. [`NoSimd`]
+    /// 1. [`Gfni`] (only with the `gfni` crate feature; needs GFNI + AVX2)
+    /// 2. [`Avx2`]
+    /// 3. [`Ssse3`]
+    /// 4. [`NoSimd`]
     ///
     /// On `AArch64` the engine is chosen in the following order of preference:
     /// 1. [`Neon`]
     /// 2. [`NoSimd`]
     pub fn new() -> Self {
+        #[cfg(all(feature = "gfni", any(target_arch = "x86", target_arch = "x86_64")))]
+        {
+            cpufeatures::new!(has_gfni, "gfni");
+            cpufeatures::new!(has_avx2, "avx2");
+            if has_gfni::get() && has_avx2::get() {
+                return Self(Box::new(Gfni::new()));
+            }
+        }
+
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
             cpufeatures::new!(has_avx2, "avx2");
@@ -104,6 +117,15 @@ impl Engine for DefaultEngine {
     }
 
     fn eval_poly(erasures: &mut [GfElement; GF_ORDER], truncated_size: usize) {
+        #[cfg(all(feature = "gfni", any(target_arch = "x86", target_arch = "x86_64")))]
+        {
+            cpufeatures::new!(has_gfni, "gfni");
+            cpufeatures::new!(has_avx2, "avx2");
+            if has_gfni::get() && has_avx2::get() {
+                return Gfni::eval_poly(erasures, truncated_size);
+            }
+        }
+
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
             cpufeatures::new!(has_avx2, "avx2");

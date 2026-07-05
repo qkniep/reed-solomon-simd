@@ -43,6 +43,11 @@ leopard-codec = "0.2.0"
 [features]
 default = ["std"]
 std = ["fixedbitset/std"]
+# Enables the GFNI engine (`GF2P8AFFINEQB`-based GF(2^16) multiply) on x86(-64).
+# Off by default: the required intrinsics are stable only on Rust >= 1.89, so
+# enabling this raises the effective MSRV. When enabled, `DefaultEngine` picks
+# `Gfni` ahead of `Avx2` on CPUs that support GFNI + AVX2.
+gfni = []
 
 [lib]
 bench = false
