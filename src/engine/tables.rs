@@ -64,6 +64,31 @@ pub struct Multiply128lutT {
     pub hi: [u128; 4],
 }
 
+/// Used by the [`Gfni`] engine for multiplications.
+///
+/// [`Gfni`]: crate::engine::Gfni
+#[cfg(all(feature = "gfni", any(target_arch = "x86", target_arch = "x86_64")))]
+pub type MulGfni = [MultiplyGfniT; GF_ORDER];
+
+/// Elements of the [`MulGfni`] table.
+///
+/// Multiply-by-constant in `GF(2^16)` is `GF(2)`-linear, hence a 16×16 bit
+/// matrix. Splitting each element into a low and high byte decomposes it into
+/// four 8×8 `GF(2)` affine maps, each packed as a `u64` in the byte order
+/// consumed by `GF2P8AFFINEQB`. Naming is `<output byte>_<input byte>`.
+#[cfg(all(feature = "gfni", any(target_arch = "x86", target_arch = "x86_64")))]
+#[derive(Clone, Copy, Debug)]
+pub struct MultiplyGfniT {
+    /// Low output byte from low input byte.
+    pub lo_lo: u64,
+    /// High output byte from low input byte.
+    pub hi_lo: u64,
+    /// Low output byte from high input byte.
+    pub lo_hi: u64,
+    /// High output byte from high input byte.
+    pub hi_hi: u64,
+}
+
 /// Used by all [`Engine`]:s in [`Engine::eval_poly`].
 ///
 /// [`Engine`]: crate::engine
@@ -147,6 +172,21 @@ pub fn get_mul128() -> &'static Mul128 {
     {
         static MUL128: OnceBox<Mul128> = OnceBox::new();
         MUL128.get_or_init(initialize_mul128)
+    }
+}
+
+/// Lazily initialized affine-matrix multiplication table for the `Gfni` engine.
+#[cfg(all(feature = "gfni", any(target_arch = "x86", target_arch = "x86_64")))]
+pub fn get_mul_gfni() -> &'static MulGfni {
+    #[cfg(feature = "std")]
+    {
+        static MUL_GFNI: LazyLock<Box<MulGfni>> = LazyLock::new(initialize_mul_gfni);
+        &MUL_GFNI
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        static MUL_GFNI: OnceBox<MulGfni> = OnceBox::new();
+        MUL_GFNI.get_or_init(initialize_mul_gfni)
     }
 }
 
@@ -281,6 +321,62 @@ fn initialize_mul128() -> Box<Mul128> {
     mul128.into_boxed_slice().try_into().unwrap()
 }
 
+/// Packs one 8×8 `GF(2)` affine matrix as a `u64` in `GF2P8AFFINEQB` byte order.
+///
+/// `cols[k]` is the full `GF(2^16)` product contribution when bit `k` of the
+/// relevant input byte is set; `hi_byte` selects which output byte this block
+/// feeds. `GF2P8AFFINEQB` computes `out.bit[i] = parity(A.byte[7 - i] & x)`, so
+/// row `7 - j` of the map (coefficients of output bit `7 - j`) is packed into
+/// `A.byte[j]`.
+#[cfg(all(feature = "gfni", any(target_arch = "x86", target_arch = "x86_64")))]
+fn build_affine(cols: &[GfElement; 8], hi_byte: bool) -> u64 {
+    let mut bytes = [0u8; 8];
+    for (j, byte) in bytes.iter_mut().enumerate() {
+        let out_bit = 7 - j;
+        let mut b = 0u8;
+        for (k, &col) in cols.iter().enumerate() {
+            let col_byte = if hi_byte { (col >> 8) as u8 } else { col as u8 };
+            b |= ((col_byte >> out_bit) & 1) << k;
+        }
+        *byte = b;
+    }
+    u64::from_le_bytes(bytes)
+}
+
+#[cfg(all(feature = "gfni", any(target_arch = "x86", target_arch = "x86_64")))]
+fn initialize_mul_gfni() -> Box<MulGfni> {
+    let exp = &get_exp_log().exp;
+    let log = &get_exp_log().log;
+
+    let mut mul_gfni = vec![
+        MultiplyGfniT {
+            lo_lo: 0,
+            hi_lo: 0,
+            lo_hi: 0,
+            hi_hi: 0,
+        };
+        GF_ORDER
+    ];
+
+    for log_m in 0..=GF_MODULUS {
+        // Product contributions of each input bit, split by input byte.
+        let mut c_lo = [0; 8];
+        let mut c_hi = [0; 8];
+        for k in 0..8 {
+            c_lo[k] = mul(1 << k, log_m, exp, log);
+            c_hi[k] = mul(1 << (8 + k), log_m, exp, log);
+        }
+        mul_gfni[log_m as usize] = MultiplyGfniT {
+            lo_lo: build_affine(&c_lo, false),
+            hi_lo: build_affine(&c_lo, true),
+            lo_hi: build_affine(&c_hi, false),
+            hi_hi: build_affine(&c_hi, true),
+        };
+    }
+
+    mul_gfni.into_boxed_slice().try_into().unwrap()
+}
+
 #[allow(clippy::needless_range_loop)]
 fn initialize_skew() -> Box<Skew> {
     let exp = &get_exp_log().exp;
@@ -321,4 +417,64 @@ fn initialize_skew() -> Box<Skew> {
     }
 
     skew
+}
+
+// ======================================================================
+// TESTS
+
+#[cfg(all(
+    test,
+    feature = "gfni",
+    any(target_arch = "x86", target_arch = "x86_64")
+))]
+mod gfni_tests {
+    use super::{get_exp_log, get_mul_gfni, mul};
+    use crate::engine::{GfElement, GF_MODULUS};
+
+    /// Scalar model of one byte of `VGF2P8AFFINEQB` with `imm8 == 0`:
+    /// `out.bit[i] = parity(A.byte[7 - i] & x)`. Mirrors the hardware
+    /// instruction so the built [`MulGfni`] table can be checked without a
+    /// GFNI-capable CPU.
+    fn affine_byte(a: u64, x: u8) -> u8 {
+        let ab = a.to_le_bytes();
+        let mut y = 0u8;
+        for i in 0..8 {
+            let bit = u8::try_from((ab[7 - i] & x).count_ones() & 1).unwrap();
+            y |= bit << i;
+        }
+        y
+    }
+
+    #[test]
+    fn mul_gfni_matches_field_multiply() {
+        let exp_log = get_exp_log();
+        let (exp, log) = (&exp_log.exp, &exp_log.log);
+        let table = get_mul_gfni();
+
+        // Representative multipliers incl. the boundary log values.
+        for &log_m in &[
+            0,
+            1,
+            2,
+            3,
+            100,
+            255,
+            256,
+            1000,
+            32767,
+            32768,
+            GF_MODULUS - 1,
+            GF_MODULUS,
+        ] {
+            let m = &table[log_m as usize];
+            for v in 0..=GF_MODULUS {
+                let lo = v as u8;
+                let hi = (v >> 8) as u8;
+                let prod_lo = affine_byte(m.lo_lo, lo) ^ affine_byte(m.lo_hi, hi);
+                let prod_hi = affine_byte(m.hi_lo, lo) ^ affine_byte(m.hi_hi, hi);
+                let got = GfElement::from(prod_lo) | (GfElement::from(prod_hi) << 8);
+                assert_eq!(got, mul(v, log_m, exp, log), "log_m={log_m} v={v}");
+            }
+        }
+    }
 }
